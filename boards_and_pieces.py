@@ -5,7 +5,9 @@ from base import *
 
 class Piece(Base):
     def __init__(self, board: "Board", is_white: bool, pos: bytes, surf_path: str):
-        super().__init__((board.get_width() / 8, board.get_height() / 8), board, {})
+        super().__init__((board.get_width() / 8, board.get_height() / 8), board, {}, pygame.SRCALPHA)
+        
+        self.name = None
         
         self.SPEED = 0.1
         
@@ -21,7 +23,19 @@ class Piece(Base):
         
         self._moves: list[list[bytes, int]] = []
         
-        self.fill(surf_path)
+        self.set_skin(surf_path)
+    
+    def set_skin(self, path: str):
+        skin = pygame.image.load(path)
+        skin = pygame.transform.scale_by(
+            skin,
+            max(
+                (self.get_width() * 0.85) / skin.get_width(),
+                (self.get_height() * 0.85) / skin.get_height()
+            )
+        )
+        
+        self.blit(skin, skin.get_rect(center=(self.get_width() / 2, self.get_height() / 2)))
     
     def _visual_move(self, to: bytes):
         dx = (to[0] - self.pos[0]) * self.get_width()
@@ -97,6 +111,8 @@ class Piece(Base):
 class Bishop(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
+        
+        self.name = "Bishop"
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -143,6 +159,8 @@ class Bishop(Piece):
 class Rook(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
+        
+        self.name = "Rook"
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -199,6 +217,8 @@ class Rook(Piece):
 class Queen(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
+        
+        self.name = "Queen"
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -207,6 +227,8 @@ class Queen(Piece):
 class King(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
+        
+        self.name = "King"
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -226,6 +248,8 @@ class King(Piece):
 class Knight(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
+        
+        self.name = "Knight"
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -244,6 +268,8 @@ class Knight(Piece):
 class Pawn(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
+        
+        self.name = "Pawn"
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -283,30 +309,47 @@ class Board(Base):
     def __init__(self, screen: pygame.Surface, board: str):
         super().__init__((min(screen.get_size()), min(screen.get_size())), screen, {"center": (screen.get_width() / 2, screen.get_height() / 2)})
         
-        self._captures = []
-        
         self.BLOCK_SIZE = self.get_width() / 8, self.get_height() / 8
         
-        self.white_pieces, self.black_pieces = self.parse_string_board(board)
-        
-        self.pieces = set(list(self.white_pieces.values()) + list(self.black_pieces.values()))
+        self._captures = []
+        self._move_selected = False
         
         self.focus_piece = None
+        self.board_style = None
         
         self.background = pygame.Surface(self.get_size())
         
-        for i in range(8 * 8):
-            x = i % 8
-            y = i // 8
-            
-            color = (125, 125, 125) if (x + y) % 2 else "brown"
-            
-            pygame.draw.rect(self.background, color, ((x * self.get_width() / 8, y * self.get_height() / 8), self.BLOCK_SIZE))
+        self.set_board_style("Brown")
+        self.white_pieces, self.black_pieces = self.parse_string_board(board, "Default", True)
+        
+        self.kill_overlay_surface = pygame.Surface(self.BLOCK_SIZE, pygame.SRCALPHA)
+        self.kill_overlay_surface.fill("lightblue")
+        self.kill_overlay_surface.set_alpha(120)
+        
+        self.pieces = set(list(self.white_pieces.values()) + list(self.black_pieces.values()))
     
     def _no_focus(self):
         self.focus_piece = None
     
-    def parse_string_board(self, string: str):
+    def set_board_style(self, style: str):
+        self.board_style = style
+        
+        board = pygame.image.load(f"assets/pieces and boards/Board {self.board_style}.png")
+        board = pygame.transform.scale_by(
+            board,
+            max(
+                self.get_width() / board.get_width(),
+                self.get_height() / board.get_height()
+            )
+        )
+        
+        self.background.blit(board, board.get_rect(center=(self.background.get_width() / 2, self.background.get_height() / 2)))
+    
+    def set_piece_style(self, style: str, O: bool = False):
+        for piece in self.pieces:
+            piece.set_skin(f"assets/pieces and boards/{"White" if piece.is_white else "Black"} {style}/{piece.name}{" O" if O else ""}.png")
+    
+    def parse_string_board(self, string: str, style: str, O: bool = False):
         index = 0
         
         white_pieces: dict[bytes, Piece] = {}
@@ -328,25 +371,32 @@ class Board(Base):
                 
                 if new_amount:
                     amount = int(new_amount)
-            
+                
                 for i in range(amount):
                     pos = bytes([index % 8 + i, index // 8])
                     
-                    pieces = black_pieces if c.islower() else white_pieces
+                    if c.islower():
+                        color = "Black"
+                        pieces = black_pieces
+                    else:
+                        color = "White"
+                        pieces = white_pieces
+                    
+                    piece_path = f"assets/pieces and boards/{color} " + style + "/{}" + f"{" O" if O else ""}.png"
                     
                     match c.lower():
                         case "r":
-                            pieces[pos] = Rook(self, not c.islower(), pos, "red" if c.islower() else (255, 10, 10))
+                            pieces[pos] = Rook(self, not c.islower(), pos, piece_path.format("Rook"))
                         case "n":
-                            pieces[pos] = Knight(self, not c.islower(), pos, "orange" if c.islower() else (255, 125, 125))
+                            pieces[pos] = Knight(self, not c.islower(), pos, piece_path.format("Knight"))
                         case "b":
-                            pieces[pos] = Bishop(self, not c.islower(), pos, "yellow" if c.islower() else (10, 255, 255))
+                            pieces[pos] = Bishop(self, not c.islower(), pos, piece_path.format("Bishop"))
                         case "q":
-                            pieces[pos] = Queen(self, not c.islower(), pos, "green" if c.islower() else (10, 255, 10))
+                            pieces[pos] = Queen(self, not c.islower(), pos, piece_path.format("Queen"))
                         case "k":
-                            pieces[pos] = King(self, not c.islower(), pos, "blue" if c.islower() else (10, 10, 255))
+                            pieces[pos] = King(self, not c.islower(), pos, piece_path.format("King"))
                         case "p":
-                            pieces[pos] = Pawn(self, not c.islower(), pos, "purple" if c.islower() else (255, 10, 255))
+                            pieces[pos] = Pawn(self, not c.islower(), pos, piece_path.format("Pawn"))
                         case "x":
                             pass
                         case _:
@@ -447,10 +497,13 @@ class Board(Base):
                     if piece.rect.collidepoint(m_pos):
                         self.focus_piece = piece
                         self.focus_piece.update_valid_moves()
+                
+                self._move_selected = False
             else:
                 pos = bytes([int(m_pos[0] // self.BLOCK_SIZE[0]), int(m_pos[1] // self.BLOCK_SIZE[1])])
                 
                 self.focus_piece.total_move(pos, self._no_focus)
+                self._move_selected = True
     
     def update(self):
         self.rect.center = (self.parent.get_width() / 2, self.parent.get_height() / 2)
@@ -461,12 +514,33 @@ class Board(Base):
     def draw(self):
         self.blit(self.background, (0, 0))
         
+        if self.focus_piece and not self._move_selected:
+            self.do_pos_from_bits(
+                self.focus_piece.get_valid_moves(),
+                lambda x, y: (
+                    pygame.draw.circle(
+                        self,
+                        self.board_style.lower(),
+                        (x * self.BLOCK_SIZE[0] + self.BLOCK_SIZE[0] / 2, y * self.BLOCK_SIZE[1] + self.BLOCK_SIZE[1] / 2),
+                        sum(self.BLOCK_SIZE) / 10
+                    )
+                    
+                    if bytes([x, y]) not in self.white_pieces and bytes([x, y]) not in self.black_pieces else
+                    
+                    self.blit(
+                        self.kill_overlay_surface,
+                        (x * self.BLOCK_SIZE[0], y * self.BLOCK_SIZE[1])
+                    )
+                )
+            )
+            
+            self._move_selected = False
+        
         for piece in (self.pieces - set([self.focus_piece])):
             piece.draw()
         
         if self.focus_piece:
             self.focus_piece.draw()
-            self.do_pos_from_bits(self.focus_piece.get_valid_moves(), lambda x, y: pygame.draw.rect(self, "black", ((x * self.BLOCK_SIZE[0], y * self.BLOCK_SIZE[1]), self.BLOCK_SIZE), 3))
         
         return super().draw()
 
