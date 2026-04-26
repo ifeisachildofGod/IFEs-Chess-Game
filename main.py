@@ -4,6 +4,7 @@ from sys import exit
 from boards_and_pieces import Board
 
 pygame.init()
+pygame.display.set_caption("IFEs Chess Game")
 screen = pygame.display.set_mode((1000, 600))
 clock = pygame.time.Clock()
 

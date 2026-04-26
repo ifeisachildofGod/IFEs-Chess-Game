@@ -19,7 +19,9 @@ class Piece(Base):
         
         self.bit_board = 0
         self._move_count = 0
-        self._valid_moves: int = 0
+        
+        self._kill_zones = 0
+        self._valid_moves = 0
         
         self._moves: list[list[bytes, int]] = []
         
@@ -51,6 +53,9 @@ class Piece(Base):
     def _pos_from_bit_pos(self, pos: bytes):
         return pos[0] * self.get_width(), pos[1] * self.get_height()
     
+    def _update_kill_zones(self, valid_moves, pos, **kwargs):
+        return self._update_valid_moves(valid_moves, pos, **kwargs)
+    
     @staticmethod
     def _update_valid_moves(valid_moves: int, pos: bytes, **kwargs):
         raise NotImplementedError()
@@ -62,6 +67,7 @@ class Piece(Base):
             is_white=self.is_white,
             team_bits=self.get_team_bits(),
             enemy_bits=self.get_enemy_bits(),
+            enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
             move_count=self._move_count,
             rook_bits=0
         )
@@ -69,18 +75,33 @@ class Piece(Base):
         self._valid_moves %= MAX_BIT
         self._valid_moves = (self.get_team_bits() ^ self._valid_moves) & self._valid_moves
     
+    def update_kill_zones(self):
+        self._kill_zones = self._update_kill_zones(
+            0,
+            self.pos,
+            is_white=self.is_white,
+            team_bits=self.get_team_bits(),
+            enemy_bits=self.get_enemy_bits(),
+            enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
+            move_count=self._move_count,
+            rook_bits=0
+        )
+        
+        self._kill_zones %= MAX_BIT
+        self._kill_zones = (self.get_team_bits() ^ self._kill_zones) & self._kill_zones
+    
     def get_team_bits(self):
         return self.board.get_white_bits() if self.is_white else self.board.get_black_bits()
     
     def get_enemy_bits(self):
         return self.board.get_black_bits() if self.is_white else self.board.get_white_bits()
     
-    def total_move(self, to: bytes, finished: Callable[[], None] | None = None):
+    def total_move(self, to: bytes, piece_set: Callable[[], None] | None = None, finished: Callable[[], None] | None = None):
         if self.pos[0] != to[0] or self.pos[1] != to[1]:
             bit_to = bit_byte_to_bits(to)
             
             if (bit_to & self.get_valid_moves()) == bit_to:
-                self._moves.append([to, int(1 / self.SPEED), finished])
+                self._moves.append([to, int(1 / self.SPEED), piece_set, finished])
                 self._move_count += 1
                 
                 return
@@ -91,14 +112,20 @@ class Piece(Base):
     def get_valid_moves(self):
         return self._valid_moves
     
+    def get_kill_zones(self):
+        return self._kill_zones
+    
     def update(self):
         if self._moves:
-            move, count, finished = self._moves[0]
+            move, count, piece_set, finished = self._moves[0]
             
             if count:
                 self._visual_move(move)
                 self._moves[0][1] -= 1
             else:
+                if piece_set and move != self.pos:
+                    piece_set()
+                
                 self._bit_move(move)
                 
                 self.rect.topleft = self._pos_from_bit_pos(self.pos)
@@ -232,15 +259,31 @@ class King(Piece):
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
-        off = bit_shift_left(5, (7 - pos[0]) - 1) % 256
+        enemy_kill_zones = kwargs["enemy_kill_zones"]
+        
+        middle_dir = (7 - pos[1]) * 8
+        top_dir = (7 - pos[1] + 1) * 8
+        bottom_dir = (7 - pos[1] - 1) * 8
+        
+        middle_mask = ((enemy_kill_zones >> middle_dir) % 256)
+        top_mask = ((enemy_kill_zones >> top_dir) % 256)
+        bottom_mask = (bit_shift_right(enemy_kill_zones, bottom_dir) % 256)
+        
+        off = bit_shift_left(5, 7 - pos[0] - 1) % 256
         vert = bit_byte_to_bits(bytes([pos[0], 7]))
         
+        left_nd_right = off & ~middle_mask
+        top_left_nd_right = off & ~top_mask
+        bottom_left_nd_right = off & ~bottom_mask
+        top_middle = vert & ~top_mask
+        bottom_middle = vert & ~bottom_mask
+        
         valid_moves |= (
-            bit_shift_left(off, (7 - pos[1] + 1) * 8) |
-            bit_shift_left(off, (7 - pos[1] - 1) * 8) |
-            bit_shift_left(off, (7 - pos[1]) * 8) |
-            bit_shift_left(vert, (7 - pos[1] - 1) * 8) |
-            bit_shift_left(vert, (7 - pos[1] + 1) * 8)
+            bit_shift_left(left_nd_right, middle_dir) |
+            bit_shift_left(top_left_nd_right, top_dir) |
+            bit_shift_left(bottom_left_nd_right, bottom_dir) |
+            bit_shift_left(top_middle, top_dir) |
+            bit_shift_left(bottom_middle, bottom_dir)
         )
         
         return valid_moves
@@ -270,6 +313,9 @@ class Pawn(Piece):
         super().__init__(board, is_white, pos, surf_path)
         
         self.name = "Pawn"
+    
+    def _update_kill_zones(self, valid_moves, pos, **kwargs):
+        return valid_moves | bit_shift_left(bit_shift_left(5, 7 - pos[0] - 1) % 256, (7 - pos[1] + kwargs["is_white"] * 2 - 1) * 8)
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -312,6 +358,7 @@ class Board(Base):
         self.BLOCK_SIZE = self.get_width() / 8, self.get_height() / 8
         
         self._captures = []
+        self._turn_tracker = True
         self._move_selected = False
         
         self.focus_piece = None
@@ -330,6 +377,12 @@ class Board(Base):
     
     def _no_focus(self):
         self.focus_piece = None
+    
+    def _piece_placed(self):
+        self._turn_tracker = not self._turn_tracker
+        
+        for piece in self.pieces:
+            piece.update_kill_zones()
     
     def set_board_style(self, style: str):
         self.board_style = style
@@ -458,8 +511,41 @@ class Board(Base):
     
     def get_black_bits(self):
         bits = 0
+        
         for pos in self.black_pieces:
             bits |= bit_byte_to_bits(pos)
+        
+        return bits
+    
+    def get_white_valid_moves(self):
+        bits = 0
+        
+        for i, pieces in enumerate(self.white_pieces.values()):
+            bits |= pieces.get_valid_moves()
+        
+        return bits
+    
+    def get_black_valid_moves(self):
+        bits = 0
+        
+        for pieces in self.black_pieces.values():
+            bits |= pieces.get_valid_moves()
+        
+        return bits
+    
+    def get_white_kill_zones(self):
+        bits = 0
+        
+        for pieces in self.white_pieces.values():
+            bits |= pieces.get_kill_zones()
+        
+        return bits
+    
+    def get_black_kill_zones(self):
+        bits = 0
+        
+        for pieces in self.black_pieces.values():
+            bits |= pieces.get_kill_zones()
         
         return bits
     
@@ -493,16 +579,18 @@ class Board(Base):
             m_pos = (event.pos[0] - self.rect.left, event.pos[1] - self.rect.top)
             
             if self.focus_piece is None:
-                for piece in self.pieces:
+                for piece in (self.white_pieces.values() if self._turn_tracker else self.black_pieces.values()):
                     if piece.rect.collidepoint(m_pos):
-                        self.focus_piece = piece
-                        self.focus_piece.update_valid_moves()
+                        piece.update_valid_moves()
+                        
+                        if piece.get_valid_moves():
+                            self.focus_piece = piece
                 
                 self._move_selected = False
             else:
                 pos = bytes([int(m_pos[0] // self.BLOCK_SIZE[0]), int(m_pos[1] // self.BLOCK_SIZE[1])])
                 
-                self.focus_piece.total_move(pos, self._no_focus)
+                self.focus_piece.total_move(pos, self._piece_placed, self._no_focus)
                 self._move_selected = True
     
     def update(self):
