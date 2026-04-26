@@ -96,7 +96,7 @@ class Piece(Base):
     def get_enemy_bits(self):
         return self.board.get_black_bits() if self.is_white else self.board.get_white_bits()
     
-    def total_move(self, to: bytes, piece_set: Callable[[], None] | None = None, finished: Callable[[], None] | None = None):
+    def total_move(self, to: bytes, piece_set: Callable[["Piece"], None] | None = None, finished: Callable[[], None] | None = None):
         if self.pos[0] != to[0] or self.pos[1] != to[1]:
             bit_to = bit_byte_to_bits(to)
             
@@ -123,13 +123,15 @@ class Piece(Base):
                 self._visual_move(move)
                 self._moves[0][1] -= 1
             else:
-                if piece_set and move != self.pos:
-                    piece_set()
+                prev_move = self.pos
                 
                 self._bit_move(move)
                 
                 self.rect.topleft = self._pos_from_bit_pos(self.pos)
                 self._moves.pop(0)
+                
+                if piece_set and move != prev_move:
+                    piece_set(self)
                 
                 if finished:
                     finished()
@@ -154,32 +156,30 @@ class Bishop(Piece):
         for i in range(7):
             i_plus_one = i + 1
             
-            top_focus = min(7 - pos[1] + i_plus_one, 7) * 8
-            bottom_focus = max(7 - pos[1] - i_plus_one, 0) * 8
-            left_focus = min(7 - pos[0] + i_plus_one, 7)
+            top_focus = (7 - pos[1] + i_plus_one) * 8
+            bottom_focus = (7 - pos[1] - i_plus_one) * 8
+            left_focus = 7 - pos[0] + i_plus_one
             right_focus = 7 - pos[0] - i_plus_one
-            
-            p_right_focus = max(right_focus, 0)
             
             path = bit_shift_left(4 * 2 ** (i * 2) + 1, right_focus) % 256
             
             top_left_mask |= (team_bits >> (top_focus + left_focus)) % 2
-            top_right_mask |= (team_bits >> (top_focus + p_right_focus)) % 2
-            bottom_left_mask |= (team_bits >> (bottom_focus + left_focus)) % 2
-            bottom_right_mask |= (team_bits >> (bottom_focus + p_right_focus)) % 2
+            top_right_mask |= bit_shift_right(team_bits, (top_focus + right_focus)) % 2
+            bottom_left_mask |= bit_shift_right(team_bits, (bottom_focus + left_focus)) % 2
+            bottom_right_mask |= bit_shift_right(team_bits, (bottom_focus + right_focus)) % 2
             
             top_path_mask = ((top_left_mask << max(right_focus + i_plus_one * 2, 0)) | bit_shift_left(top_right_mask, right_focus)) % 256
             bottom_path_mask = ((bottom_left_mask << max(right_focus + i_plus_one * 2, 0)) | bit_shift_left(bottom_right_mask, right_focus)) % 256
             
             top = (path & ~top_path_mask) << top_focus
-            bottom = (path & ~bottom_path_mask) << bottom_focus
+            bottom = bit_shift_left((path & ~bottom_path_mask), bottom_focus)
             
             valid_moves |= (top | bottom)
             
             top_left_mask |= (enemy_bits >> (top_focus + left_focus)) % 2
-            top_right_mask |= (enemy_bits >> (top_focus + p_right_focus)) % 2
-            bottom_left_mask |= (enemy_bits >> (bottom_focus + left_focus)) % 2
-            bottom_right_mask |= (enemy_bits >> (bottom_focus + p_right_focus)) % 2
+            top_right_mask |= bit_shift_right(enemy_bits, (top_focus + right_focus)) % 2
+            bottom_left_mask |= bit_shift_right(enemy_bits, (bottom_focus + left_focus)) % 2
+            bottom_right_mask |= bit_shift_right(enemy_bits, (bottom_focus + right_focus)) % 2
         
         return valid_moves
 
@@ -355,6 +355,17 @@ class Board(Base):
     def __init__(self, screen: pygame.Surface, board: str):
         super().__init__((min(screen.get_size()), min(screen.get_size())), screen, {"center": (screen.get_width() / 2, screen.get_height() / 2)})
         
+        self._class_text_map = {
+            Rook: "r",
+            Bishop: "b",
+            Knight: "n",
+            Queen: "q",
+            King: "k",
+            Pawn: "p",
+            type(None): "x"
+        }
+        self._text_class_map = {v: k for k, v in self._class_text_map.items()}
+        
         self.BLOCK_SIZE = self.get_width() / 8, self.get_height() / 8
         
         self._captures = []
@@ -374,15 +385,20 @@ class Board(Base):
         self.kill_overlay_surface.set_alpha(120)
         
         self.pieces = set(list(self.white_pieces.values()) + list(self.black_pieces.values()))
+        
+        for piece in self.pieces:
+            piece.update_valid_moves()
+            piece.update_kill_zones()
+            piece.update_valid_moves()
+            piece.update_kill_zones()
     
     def _no_focus(self):
         self.focus_piece = None
     
-    def _piece_placed(self):
+    def _piece_placed(self, piece: Piece):
         self._turn_tracker = not self._turn_tracker
         
-        for piece in self.pieces:
-            piece.update_kill_zones()
+        piece.update_kill_zones()
     
     def set_board_style(self, style: str):
         self.board_style = style
@@ -437,23 +453,10 @@ class Board(Base):
                     
                     piece_path = f"assets/pieces and boards/{color} " + style + "/{}" + f"{" O" if O else ""}.png"
                     
-                    match c.lower():
-                        case "r":
-                            pieces[pos] = Rook(self, not c.islower(), pos, piece_path.format("Rook"))
-                        case "n":
-                            pieces[pos] = Knight(self, not c.islower(), pos, piece_path.format("Knight"))
-                        case "b":
-                            pieces[pos] = Bishop(self, not c.islower(), pos, piece_path.format("Bishop"))
-                        case "q":
-                            pieces[pos] = Queen(self, not c.islower(), pos, piece_path.format("Queen"))
-                        case "k":
-                            pieces[pos] = King(self, not c.islower(), pos, piece_path.format("King"))
-                        case "p":
-                            pieces[pos] = Pawn(self, not c.islower(), pos, piece_path.format("Pawn"))
-                        case "x":
-                            pass
-                        case _:
-                            raise ValueError(f"Invalid character in board string: {c}")
+                    cls = self._text_class_map[c.lower()]
+                    
+                    if cls != type(None):
+                        pieces[pos] = cls(self, not c.islower(), pos, piece_path.format(c.upper()))
                 
                 index += amount
 
@@ -465,40 +468,46 @@ class Board(Base):
         pieces = self.white_pieces.copy()
         pieces.update(self.black_pieces)
         
-        amount = 0
+        prev = ""
+        amount = -1
         
-        for i in range(8 * 8):
+        temp = ""
+        prev_temp = ""
+        
+        pieces_str = ""
+        
+        for i in range((8 * 8) + 1):
             x = i % 8
             y = i // 8
             
             amount += 1
             piece = pieces.get(bytes([x, y]))
             
-            if isinstance(piece, Rook):
-                c = "r"
-            elif isinstance(piece, Bishop):
-                c = "b"
-            elif isinstance(piece, Knight):
-                c = "n"
-            elif isinstance(piece, Queen):
-                c = "q"
-            elif isinstance(piece, King):
-                c = "k"
-            elif isinstance(piece, Pawn):
-                c = "p"
-            else:
-                c = "x"
+            c = self._class_text_map[piece.__class__]
             
-            if prev != c:
-                if c:
-                    string += (c.upper() if piece.is_white else c)
+            if prev and prev != c:
+                temp = pieces_str[-1] + (str(amount) if amount != 1 else "")
                 
-                if amount != 1:
-                    string += str(amount)
+                string += temp if not prev_temp or (len(temp) == 1 and len(prev_temp) == 1) else " " + temp
+                
+                prev_temp = temp
                 
                 amount = 0
             
             prev = c
+            pieces_str += c.upper() if piece and piece.is_white else c
+        
+        index = None
+        
+        for i, c in enumerate(reversed(list(string))):
+            if c and not c.isnumeric():
+                if c != "x":
+                    break
+                else:
+                    index = len(string) - i - 1
+        
+        if index:
+            string = string[:index]
         
         return string
     
