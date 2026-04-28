@@ -29,18 +29,6 @@ class Piece(Base):
         
         self.set_skin(surf_path)
     
-    def set_skin(self, path: str):
-        skin = pygame.image.load(path)
-        skin = pygame.transform.scale_by(
-            skin,
-            max(
-                (self.get_width() * 0.85) / skin.get_width(),
-                (self.get_height() * 0.85) / skin.get_height()
-            )
-        )
-        
-        self.blit(skin, skin.get_rect(center=(self.get_width() / 2, self.get_height() / 2)))
-    
     def _visual_move(self, to: bytes):
         dx = (to[0] - self.pos[0]) * self.get_width()
         dy = (to[1] - self.pos[1]) * self.get_height()
@@ -70,10 +58,23 @@ class Piece(Base):
     def _update_attack_paths(pos: bytes, valid_paths: list[int] | None, **kwargs) -> tuple[int, ...]:
         raise NotImplementedError()
     
+    def set_skin(self, path: str):
+        skin = pygame.image.load(path)
+        skin = pygame.transform.scale_by(
+            skin,
+            max(
+                (self.get_width() * 0.85) / skin.get_width(),
+                (self.get_height() * 0.85) / skin.get_height()
+            )
+        )
+        
+        self.blit(skin, skin.get_rect(center=(self.get_width() / 2, self.get_height() / 2)))
+    
     def filter_checks(self, valid_moves: int):
         pointed_enemies = list(self.board.get_black_point_pieces() if self.is_white else self.board.get_white_point_pieces())
-        pathed_enemies = self.board.get_black_pathed_pieces() if self.is_white else self.board.get_white_pathed_pieces()
+        pathed_enemies = list(self.board.get_black_pathed_pieces() if self.is_white else self.board.get_white_pathed_pieces())
         
+        my_bit = bit_byte_to_bits(self.pos)
         king_bit = bit_byte_to_bits(self.get_team_king().pos)
         
         for i, piece in enumerate(self.get_checking_enemies(king_bit, pointed_enemies, pathed_enemies)):
@@ -86,9 +87,9 @@ class Piece(Base):
         else:
             for piece in pathed_enemies:
                 for i, ua_path in enumerate(piece.get_king_attack_paths()):
-                    a_path = piece.get_attack_paths()[i]
+                    a_path = piece.get_attack_paths()[i] % MAX_BIT
                     
-                    if ua_path & king_bit and valid_moves & king_bit and valid_moves & a_path:
+                    if ua_path & king_bit and not ((self.get_team_bits() & ~(my_bit | king_bit)) & ua_path) and a_path & my_bit:
                         valid_moves &= a_path | bit_byte_to_bits(piece.pos)
                         
                         break
@@ -138,6 +139,9 @@ class Piece(Base):
             self=self
         )
         
+        self.update_king_attack_paths()
+    
+    def update_king_attack_paths(self):
         self._king_attack_paths = self._update_attack_paths(
             self.pos,
             0,
