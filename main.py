@@ -9,7 +9,7 @@ screen = pygame.display.set_mode((1000, 600))
 clock = pygame.time.Clock()
 
 
-board = Board(screen, "rnbqkbnr p8 x32 P8 RNBKQBNR")
+board = Board(screen, "rnbqkbnr p8 x32 P8 RNBQKBNR")
 
 while True:
     for event in pygame.event.get():

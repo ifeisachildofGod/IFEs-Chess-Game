@@ -1,5 +1,5 @@
 
-from typing import Callable
+from typing import Any, Callable, Generator
 from base import *
 
 
@@ -22,6 +22,8 @@ class Piece(Base):
         
         self._kill_zones = 0
         self._valid_moves = 0
+        self._attack_paths = ()
+        self._king_attack_paths = ()
         
         self._moves: list[list[bytes, int]] = []
         
@@ -53,48 +55,115 @@ class Piece(Base):
     def _pos_from_bit_pos(self, pos: bytes):
         return pos[0] * self.get_width(), pos[1] * self.get_height()
     
-    def _update_kill_zones(self, valid_moves, pos, **kwargs):
-        return self._update_valid_moves(valid_moves, pos, **kwargs)
+    @staticmethod
+    def _update_kill_zones(valid_moves: int, pos: bytes, **kwargs) -> int:
+        return kwargs["self"]._update_valid_moves(valid_moves, pos, **kwargs)
     
     @staticmethod
-    def _update_valid_moves(valid_moves: int, pos: bytes, **kwargs):
+    def _update_valid_moves(valid_moves: int, pos: bytes, **kwargs) -> int:
+        for path in kwargs["self"]._update_attack_paths(pos, None, **kwargs):
+            valid_moves |= path
+        
+        return valid_moves
+    
+    @staticmethod
+    def _update_attack_paths(pos: bytes, valid_paths: list[int] | None, **kwargs) -> tuple[int, ...]:
         raise NotImplementedError()
+    
+    def filter_checks(self, valid_moves: int):
+        pointed_enemies = list(self.board.get_black_point_pieces() if self.is_white else self.board.get_white_point_pieces())
+        pathed_enemies = self.board.get_black_pathed_pieces() if self.is_white else self.board.get_white_pathed_pieces()
+        
+        king_bit = bit_byte_to_bits(self.get_team_king().pos)
+        
+        for i, piece in enumerate(self.get_checking_enemies(king_bit, pointed_enemies, pathed_enemies)):
+            n_moves = bit_byte_to_bits(piece.pos)
+            
+            if isinstance(piece, (Queen, Rook, Bishop)):
+                n_moves |= next(a_path for a_path in piece.get_attack_paths() if king_bit & a_path)
+            
+            valid_moves &= n_moves
+        else:
+            for piece in pathed_enemies:
+                for i, ua_path in enumerate(piece.get_king_attack_paths()):
+                    a_path = piece.get_attack_paths()[i]
+                    
+                    if ua_path & king_bit and valid_moves & king_bit and valid_moves & a_path:
+                        valid_moves &= a_path | bit_byte_to_bits(piece.pos)
+                        
+                        break
+        
+        return valid_moves
     
     def update_valid_moves(self):
         self._valid_moves = self._update_valid_moves(
             0,
             self.pos,
+            self=self,
             is_white=self.is_white,
             team_bits=self.get_team_bits(),
             enemy_bits=self.get_enemy_bits(),
             enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
             move_count=self._move_count,
-            rook_bits=0
-        )
+            rook_bits=0,
+        ) % MAX_BIT
         
-        self._valid_moves %= MAX_BIT
-        self._valid_moves = (self.get_team_bits() ^ self._valid_moves) & self._valid_moves
+        self._valid_moves = self.filter_checks((self.get_team_bits() ^ self._valid_moves) & self._valid_moves)
     
     def update_kill_zones(self):
         self._kill_zones = self._update_kill_zones(
             0,
             self.pos,
             is_white=self.is_white,
-            team_bits=self.get_team_bits(),
-            enemy_bits=self.get_enemy_bits(),
+            team_bits=0,
+            enemy_bits=self.get_enemy_bits() | self.get_team_bits(),
+            enemy_kill_zones=self.board.get_white_kill_zones() + (self.board.get_black_kill_zones() - self.board.get_white_kill_zones()) * self.is_white,
+            move_count=self._move_count,
+            rook_bits=0,
+            self=self
+        ) % MAX_BIT
+        
+        self.update_attack_paths()
+    
+    def update_attack_paths(self):
+        self._attack_paths = self._update_attack_paths(
+            self.pos,
+            0,
+            is_white=self.is_white,
+            team_bits=0,
+            enemy_bits=self.get_enemy_bits() | self.get_team_bits(),
             enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
             move_count=self._move_count,
-            rook_bits=0
+            rook_bits=0,
+            self=self
         )
         
-        self._kill_zones %= MAX_BIT
-        self._kill_zones = (self.get_team_bits() ^ self._kill_zones) & self._kill_zones
+        self._king_attack_paths = self._update_attack_paths(
+            self.pos,
+            0,
+            is_white=self.is_white,
+            team_bits=0,
+            enemy_bits=self.get_team_bits() | bit_byte_to_bits(self.get_enemy_king().pos),
+            enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
+            move_count=self._move_count,
+            rook_bits=0,
+            self=self
+        )
     
     def get_team_bits(self):
         return self.board.get_white_bits() if self.is_white else self.board.get_black_bits()
     
     def get_enemy_bits(self):
         return self.board.get_black_bits() if self.is_white else self.board.get_white_bits()
+    
+    def get_checking_enemies(self, king_bit: int, pointed_enemies: list["Piece"], pathed_enemies: Generator["Piece", Any, None]):
+        for piece in pointed_enemies:
+            if king_bit & piece.get_kill_zones():
+                yield piece
+        
+        for piece in pathed_enemies:
+            if king_bit & piece.get_kill_zones():
+                yield piece
     
     def total_move(self, to: bytes, piece_set: Callable[["Piece"], None] | None = None, finished: Callable[[], None] | None = None):
         if self.pos[0] != to[0] or self.pos[1] != to[1]:
@@ -114,6 +183,18 @@ class Piece(Base):
     
     def get_kill_zones(self):
         return self._kill_zones
+    
+    def get_attack_paths(self):
+        return self._attack_paths
+    
+    def get_king_attack_paths(self):
+        return self._king_attack_paths
+    
+    def get_team_king(self):
+        return self.board.get_white_king() if self.is_white else self.board.get_black_king()
+    
+    def get_enemy_king(self):
+        return self.board.get_black_king() if self.is_white else self.board.get_white_king()
     
     def update(self):
         if self._moves:
@@ -137,52 +218,6 @@ class Piece(Base):
                     finished()
 
 
-class Bishop(Piece):
-    def __init__(self, board, is_white, pos, surf_path):
-        super().__init__(board, is_white, pos, surf_path)
-        
-        self.name = "Bishop"
-    
-    @staticmethod
-    def _update_valid_moves(valid_moves, pos, **kwargs):
-        team_bits = kwargs["team_bits"]
-        enemy_bits = kwargs["enemy_bits"]
-        
-        top_left_mask = 0
-        top_right_mask = 0
-        bottom_left_mask = 0
-        bottom_right_mask = 0
-        
-        for i in range(7):
-            i_plus_one = i + 1
-            
-            top_focus = (7 - pos[1] + i_plus_one) * 8
-            bottom_focus = (7 - pos[1] - i_plus_one) * 8
-            left_focus = 7 - pos[0] + i_plus_one
-            right_focus = 7 - pos[0] - i_plus_one
-            
-            path = bit_shift_left(4 * 2 ** (i * 2) + 1, right_focus) % 256
-            
-            top_left_mask |= (team_bits >> (top_focus + left_focus)) % 2
-            top_right_mask |= bit_shift_right(team_bits, (top_focus + right_focus)) % 2
-            bottom_left_mask |= bit_shift_right(team_bits, (bottom_focus + left_focus)) % 2
-            bottom_right_mask |= bit_shift_right(team_bits, (bottom_focus + right_focus)) % 2
-            
-            top_path_mask = ((top_left_mask << max(right_focus + i_plus_one * 2, 0)) | bit_shift_left(top_right_mask, right_focus)) % 256
-            bottom_path_mask = ((bottom_left_mask << max(right_focus + i_plus_one * 2, 0)) | bit_shift_left(bottom_right_mask, right_focus)) % 256
-            
-            top = (path & ~top_path_mask) << top_focus
-            bottom = bit_shift_left((path & ~bottom_path_mask), bottom_focus)
-            
-            valid_moves |= (top | bottom)
-            
-            top_left_mask |= (enemy_bits >> (top_focus + left_focus)) % 2
-            top_right_mask |= bit_shift_right(enemy_bits, (top_focus + right_focus)) % 2
-            bottom_left_mask |= bit_shift_right(enemy_bits, (bottom_focus + left_focus)) % 2
-            bottom_right_mask |= bit_shift_right(enemy_bits, (bottom_focus + right_focus)) % 2
-        
-        return valid_moves
-
 class Rook(Piece):
     def __init__(self, board, is_white, pos, surf_path):
         super().__init__(board, is_white, pos, surf_path)
@@ -190,7 +225,9 @@ class Rook(Piece):
         self.name = "Rook"
     
     @staticmethod
-    def _update_valid_moves(valid_moves, pos, **kwargs):
+    def _update_attack_paths(pos, valid_paths, **kwargs):
+        t, b, l, r = valid_paths or [0, 0, 0, 0]
+        
         team_bits = kwargs["team_bits"]
         enemy_bits = kwargs["enemy_bits"]
         
@@ -201,8 +238,6 @@ class Rook(Piece):
         
         team_horiz = (team_bits >> (7 - pos[1]) * 8) % 256
         enemy_horiz = (enemy_bits >> (7 - pos[1]) * 8) % 256
-        
-        central_row = 0
         
         for i in range(7):
             i_plus_one = i + 1
@@ -221,7 +256,8 @@ class Rook(Piece):
             top &= ~(top_mask << top_focus)
             bottom &= ~(bottom_mask << bottom_focus)
             
-            valid_moves |= (top | bottom)
+            t |= top
+            b |= bottom
             
             top_mask |= (enemy_bits >> top_focus) % 256
             bottom_mask |= (enemy_bits >> bottom_focus) % 256
@@ -232,14 +268,62 @@ class Rook(Piece):
             left_mask |= (team_horiz >> left_focus) % 2
             right_mask |= (team_horiz >> right_focus) % 2
             
-            central_row |= (((1 & ~left_mask) << left_focus) | ((1 & ~right_mask) << right_focus)) % 256
+            l |= (((1 & ~left_mask) << left_focus) % 256) << ((7 - pos[1]) * 8)
+            r |= (((1 & ~right_mask) << right_focus) % 256) << ((7 - pos[1]) * 8)
             
             left_mask |= (enemy_horiz >> left_focus) % 2
             right_mask |= (enemy_horiz >> right_focus) % 2
         
-        valid_moves |= central_row << ((7 - pos[1]) * 8)
+        return t, b, l, r
+
+class Bishop(Piece):
+    def __init__(self, board, is_white, pos, surf_path):
+        super().__init__(board, is_white, pos, surf_path)
         
-        return valid_moves
+        self.name = "Bishop"
+    
+    @staticmethod
+    def _update_attack_paths(pos, valid_paths, **kwargs):
+        tr, tl, br, bl = (valid_paths or [0, 0, 0, 0])
+        
+        team_bits = kwargs["team_bits"]
+        enemy_bits = kwargs["enemy_bits"]
+        
+        top_left_mask = 0
+        top_right_mask = 0
+        bottom_left_mask = 0
+        bottom_right_mask = 0
+        
+        for i in range(7):
+            i_plus_one = i + 1
+            
+            top_focus = (7 - pos[1] + i_plus_one) * 8
+            bottom_focus = (7 - pos[1] - i_plus_one) * 8
+            left_focus = 7 - pos[0] + i_plus_one
+            right_focus = 7 - pos[0] - i_plus_one
+            
+            path1 = bit_shift_left(4 * 2 ** (i * 2), right_focus) % 256
+            path2 = bit_shift_left(1, right_focus) % 256
+            
+            top_left_mask |= (team_bits >> (top_focus + left_focus)) % 2
+            top_right_mask |= bit_shift_right(team_bits, (top_focus + right_focus)) % 2
+            bottom_left_mask |= bit_shift_right(team_bits, (bottom_focus + left_focus)) % 2
+            bottom_right_mask |= bit_shift_right(team_bits, (bottom_focus + right_focus)) % 2
+            
+            top_path_mask = ((top_left_mask << max(right_focus + i_plus_one * 2, 0)) | bit_shift_left(top_right_mask, right_focus)) % 256
+            bottom_path_mask = ((bottom_left_mask << max(right_focus + i_plus_one * 2, 0)) | bit_shift_left(bottom_right_mask, right_focus)) % 256
+            
+            tr |= (path1 & ~top_path_mask) << top_focus
+            tl |= (path2 & ~top_path_mask) << top_focus
+            br |= bit_shift_left((path1 & ~bottom_path_mask), bottom_focus)
+            bl |= bit_shift_left((path2 & ~bottom_path_mask), bottom_focus)
+            
+            top_left_mask |= (enemy_bits >> (top_focus + left_focus)) % 2
+            top_right_mask |= bit_shift_right(enemy_bits, (top_focus + right_focus)) % 2
+            bottom_left_mask |= bit_shift_right(enemy_bits, (bottom_focus + left_focus)) % 2
+            bottom_right_mask |= bit_shift_right(enemy_bits, (bottom_focus + right_focus)) % 2
+        
+        return tr, tl, br, bl
 
 class Queen(Piece):
     def __init__(self, board, is_white, pos, surf_path):
@@ -248,8 +332,10 @@ class Queen(Piece):
         self.name = "Queen"
     
     @staticmethod
-    def _update_valid_moves(valid_moves, pos, **kwargs):
-        return Bishop._update_valid_moves(Rook._update_valid_moves(valid_moves, pos, **kwargs), pos, **kwargs)
+    def _update_attack_paths(pos, valid_paths, **kwargs):
+        valid_paths = valid_paths or [0, 0, 0, 0, 0, 0, 0, 0]
+        
+        return Rook._update_attack_paths(pos, valid_paths[:4], **kwargs) + Bishop._update_attack_paths(pos, valid_paths[4:], **kwargs)
 
 class King(Piece):
     def __init__(self, board, is_white, pos, surf_path):
@@ -258,7 +344,9 @@ class King(Piece):
         self.name = "King"
     
     @staticmethod
-    def _update_valid_moves(valid_moves, pos, **kwargs):
+    def _update_attack_paths(pos, valid_paths, **kwargs):
+        t, b, l, r, tl, tr, bl, br = valid_paths or [0, 0, 0, 0, 0, 0, 0, 0]
+        
         enemy_kill_zones = kwargs["enemy_kill_zones"]
         
         middle_dir = (7 - pos[1]) * 8
@@ -269,24 +357,20 @@ class King(Piece):
         top_mask = ((enemy_kill_zones >> top_dir) % 256)
         bottom_mask = (bit_shift_right(enemy_kill_zones, bottom_dir) % 256)
         
-        off = bit_shift_left(5, 7 - pos[0] - 1) % 256
-        vert = bit_byte_to_bits(bytes([pos[0], 7]))
+        left = bit_shift_left(4, 7 - pos[0] - 1) % 256
+        right = bit_shift_left(1, 7 - pos[0] - 1) % 256
+        center = bit_byte_to_bits(bytes([pos[0], 7]))
         
-        left_nd_right = off & ~middle_mask
-        top_left_nd_right = off & ~top_mask
-        bottom_left_nd_right = off & ~bottom_mask
-        top_middle = vert & ~top_mask
-        bottom_middle = vert & ~bottom_mask
-        
-        valid_moves |= (
-            bit_shift_left(left_nd_right, middle_dir) |
-            bit_shift_left(top_left_nd_right, top_dir) |
-            bit_shift_left(bottom_left_nd_right, bottom_dir) |
-            bit_shift_left(top_middle, top_dir) |
-            bit_shift_left(bottom_middle, bottom_dir)
+        return (
+            t | bit_shift_left(center & ~top_mask, top_dir),
+            b | bit_shift_left(center & ~bottom_mask, bottom_dir),
+            l | bit_shift_left(left & ~middle_mask, middle_dir),
+            r | bit_shift_left(right & ~middle_mask, middle_dir),
+            tl | bit_shift_left(left & ~top_mask, top_dir),
+            tr | bit_shift_left(right & ~top_mask, top_dir),
+            bl | bit_shift_left(left & ~bottom_mask, bottom_dir),
+            br | bit_shift_left(right & ~bottom_mask, bottom_dir),
         )
-        
-        return valid_moves
 
 class Knight(Piece):
     def __init__(self, board, is_white, pos, surf_path):
@@ -295,18 +379,25 @@ class Knight(Piece):
         self.name = "Knight"
     
     @staticmethod
-    def _update_valid_moves(valid_moves, pos, **kwargs):
-        off1 = bit_shift_left(5, (7 - pos[0]) - 1) % 256
-        off2 = bit_shift_left(17, (7 - pos[0]) - 2) % 256
+    def _update_attack_paths(pos, valid_paths, **kwargs):
         
-        valid_moves |= (
-            bit_shift_left(off1, (7 - pos[1] + 2) * 8) |
-            bit_shift_left(off1, (7 - pos[1] - 2) * 8) |
-            bit_shift_left(off2, (7 - pos[1] + 1) * 8) |
-            bit_shift_left(off2, (7 - pos[1] - 1) * 8)
+        uul, uur, lul, lur, ull, ulr, lll, llr = valid_paths or [0, 0, 0, 0, 0, 0, 0, 0]
+        
+        upper_left = bit_shift_left(4, 7 - pos[0] - 1) % 256
+        upper_right = bit_shift_left(1, 7 - pos[0] - 1) % 256
+        lower_left = bit_shift_left(16, 7 - pos[0] - 2) % 256
+        lower_right = bit_shift_left(1, 7 - pos[0] - 2) % 256
+        
+        return (
+            uul | bit_shift_left(upper_left, (7 - pos[1] + 2) * 8),
+            uur | bit_shift_left(upper_right, (7 - pos[1] + 2) * 8),
+            lul | bit_shift_left(lower_left, (7 - pos[1] + 1) * 8),
+            lur | bit_shift_left(lower_right, (7 - pos[1] + 1) * 8),
+            ull | bit_shift_left(lower_left, (7 - pos[1] - 1) * 8),
+            ulr | bit_shift_left(lower_right, (7 - pos[1] - 1) * 8),
+            lll | bit_shift_left(upper_left, (7 - pos[1] - 2) * 8),
+            llr | bit_shift_left(upper_right, (7 - pos[1] - 2) * 8)
         )
-        
-        return valid_moves
 
 class Pawn(Piece):
     def __init__(self, board, is_white, pos, surf_path):
@@ -314,8 +405,20 @@ class Pawn(Piece):
         
         self.name = "Pawn"
     
-    def _update_kill_zones(self, valid_moves, pos, **kwargs):
-        return valid_moves | bit_shift_left(bit_shift_left(5, 7 - pos[0] - 1) % 256, (7 - pos[1] + kwargs["is_white"] * 2 - 1) * 8)
+    @staticmethod
+    def _update_attack_paths(pos, valid_paths, **kwargs):
+        l, r = valid_paths or (0, 0)
+        
+        return (
+            l | bit_shift_left(bit_shift_left(4, 7 - pos[0] - 1) % 256, (7 - pos[1] + kwargs["is_white"] * 2 - 1) * 8),
+            r | bit_shift_left(bit_shift_left(1, 7 - pos[0] - 1) % 256, (7 - pos[1] + kwargs["is_white"] * 2 - 1) * 8)
+        )
+    
+    @staticmethod
+    def _update_kill_zones(_, pos, **kwargs):
+        attacks = kwargs["self"]._update_attack_paths(pos, None, **kwargs)
+        
+        return attacks[0] | attacks[1]
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
@@ -340,7 +443,7 @@ class Pawn(Piece):
         
         single_move = bit_shift_left(vert_single, single_next_level)
         double_move = ((move_count != 0) or (bit_shift_left(vert_double, double_next_level) + 1)) - 1
-        capturables = bit_shift_left(bit_shift_left(5, 7 - pos[0] - 1) % 256, single_next_level) & enemy_bits
+        capturables = kwargs["self"]._update_kill_zones(None, pos, **kwargs) & enemy_bits
         
         valid_moves |= (
             single_move |
@@ -368,9 +471,14 @@ class Board(Base):
         
         self.BLOCK_SIZE = self.get_width() / 8, self.get_height() / 8
         
+        self._white_king = None
+        self._black_king = None
+        
         self._captures = []
         self._turn_tracker = True
         self._move_selected = False
+        
+        self.is_check = False
         
         self.focus_piece = None
         self.board_style = None
@@ -389,8 +497,6 @@ class Board(Base):
         for piece in self.pieces:
             piece.update_valid_moves()
             piece.update_kill_zones()
-            piece.update_valid_moves()
-            piece.update_kill_zones()
     
     def _no_focus(self):
         self.focus_piece = None
@@ -399,6 +505,9 @@ class Board(Base):
         self._turn_tracker = not self._turn_tracker
         
         piece.update_kill_zones()
+        
+        for e_pieces in self.pieces:
+            e_pieces.update_kill_zones()
     
     def set_board_style(self, style: str):
         self.board_style = style
@@ -441,22 +550,30 @@ class Board(Base):
                 if new_amount:
                     amount = int(new_amount)
                 
+                is_white = not c.islower()
+                
                 for i in range(amount):
                     pos = bytes([index % 8 + i, index // 8])
                     
-                    if c.islower():
-                        color = "Black"
-                        pieces = black_pieces
-                    else:
+                    if is_white:
                         color = "White"
                         pieces = white_pieces
+                    else:
+                        color = "Black"
+                        pieces = black_pieces
                     
                     piece_path = f"assets/pieces and boards/{color} " + style + "/{}" + f"{" O" if O else ""}.png"
                     
                     cls = self._text_class_map[c.lower()]
                     
                     if cls != type(None):
-                        pieces[pos] = cls(self, not c.islower(), pos, piece_path.format(c.upper()))
+                        pieces[pos] = cls(self, is_white, pos, piece_path.format(c.upper()))
+                        
+                        if isinstance(pieces[pos], King):
+                            if is_white:
+                                self._white_king = pieces[pos]
+                            else:
+                                self._black_king = pieces[pos]
                 
                 index += amount
 
@@ -529,7 +646,7 @@ class Board(Base):
     def get_white_valid_moves(self):
         bits = 0
         
-        for i, pieces in enumerate(self.white_pieces.values()):
+        for pieces in self.white_pieces.values():
             bits |= pieces.get_valid_moves()
         
         return bits
@@ -557,6 +674,32 @@ class Board(Base):
             bits |= pieces.get_kill_zones()
         
         return bits
+    
+    def get_white_pathed_pieces(self):
+        for piece in self.white_pieces.values():
+            if isinstance(piece, (Queen, Rook, Bishop)):
+                yield piece
+    
+    def get_black_pathed_pieces(self):
+        for piece in self.black_pieces.values():
+            if isinstance(piece, (Queen, Rook, Bishop)):
+                yield piece
+    
+    def get_white_point_pieces(self):
+        for piece in self.white_pieces.values():
+            if not isinstance(piece, (Queen, Rook, Bishop)):
+                yield piece
+    
+    def get_black_point_pieces(self):
+        for piece in self.black_pieces.values():
+            if not isinstance(piece, (Queen, Rook, Bishop)):
+                yield piece
+    
+    def get_white_king(self):
+        return self._white_king
+    
+    def get_black_king(self):
+        return self._black_king
     
     def capture(self, captor_state: bool, captor: bytes, prisoner: bytes):
         pris_pieces = self.black_pieces if captor_state else self.white_pieces
@@ -587,20 +730,22 @@ class Board(Base):
         if event.type == pygame.MOUSEBUTTONDOWN:
             m_pos = (event.pos[0] - self.rect.left, event.pos[1] - self.rect.top)
             
-            if self.focus_piece is None:
-                for piece in (self.white_pieces.values() if self._turn_tracker else self.black_pieces.values()):
-                    if piece.rect.collidepoint(m_pos):
-                        piece.update_valid_moves()
+            for piece in (self.white_pieces.values() if self._turn_tracker else self.black_pieces.values()):
+                if piece.rect.collidepoint(m_pos) and piece != self.focus_piece:
+                    piece.update_valid_moves()
+                    
+                    if piece.get_valid_moves():
+                        self.focus_piece = piece
                         
-                        if piece.get_valid_moves():
-                            self.focus_piece = piece
-                
-                self._move_selected = False
+                        self._move_selected = False
+                    
+                    break
             else:
-                pos = bytes([int(m_pos[0] // self.BLOCK_SIZE[0]), int(m_pos[1] // self.BLOCK_SIZE[1])])
-                
-                self.focus_piece.total_move(pos, self._piece_placed, self._no_focus)
-                self._move_selected = True
+                if self.focus_piece is not None:
+                    pos = bytes([int(m_pos[0] // self.BLOCK_SIZE[0]), int(m_pos[1] // self.BLOCK_SIZE[1])])
+                    
+                    self.focus_piece.total_move(pos, self._piece_placed, self._no_focus)
+                    self._move_selected = True
     
     def update(self):
         self.rect.center = (self.parent.get_width() / 2, self.parent.get_height() / 2)

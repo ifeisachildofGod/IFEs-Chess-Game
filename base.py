@@ -3,23 +3,23 @@ import pygame
 
 MAX_BIT = 0x10000000000000000
 
-def print_bitboard(bits: int):
-    rep = bin(bits).removeprefix("0b")
+def print_bitboard(*bits: int, sep=" ", end="\n"):
+    reps = [(64 - len(b)) * "0" + b for bit in bits if (b := bin(bit).removeprefix("0b"))]
     
-    assert len(rep) <= 64
+    for rep in reps:
+        assert len(rep) <= 64
     
-    sub_text = ""
     text = ""
+    sub_texts = ["" for _ in bits]
     
-    for i, c in enumerate((64 - len(rep)) * "0" + rep):
+    for i in range(64):
+        sub_texts = [sub_text + reps[_i][i] for _i, sub_text in enumerate(sub_texts)]
+        
         if not (i + 1) % 8:
-            text += sub_text + c + "\n"
-            sub_text = ""
-        else:
-            sub_text += c
+            text += sep.join(sub_texts) + ("\n" if i != 63 else end)
+            sub_texts = ["" for _ in bits]
     
     print(text)
-    print()
 
 def bit_shift_left(bit: int, by: int):
     return (bit >> abs(by)) if by < 0 else (bit << by)
