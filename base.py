@@ -1,4 +1,5 @@
 
+import math
 import pygame
 
 MAX_BIT = 0x10000000000000000
@@ -30,16 +31,22 @@ def bit_shift_right(bit: int, by: int):
 def bit_byte_to_bits(pos: bytes, value: int | None = None):
     return bit_shift_left(value or 1, (7 - pos[0]) + (7 - pos[1]) * 8)
 
+def bits_to_bit_byte(bits: int):
+    return bytes([7 - (int(math.log2(bits)) % 8), 7 - (int(math.log2(bits)) // 8)])
+
 def remove_bits(bits: int, remove: int, length: int):
     return bits & (((1 << length) - 1) ^ remove)
 
 
 class Base(pygame.Surface):
-    def __init__(self, size, parent: pygame.Surface, pos_kwargs: dict[str, tuple[float | int, float | int] | int | float], flags = 0):
+    def __init__(self, size, parent: "pygame.Surface | Base", pos_kwargs: dict[str, tuple[float | int, float | int] | int | float], flags = 0):
         super().__init__(size, flags)
         
         self.parent = parent
         self.rect = self.get_rect(**pos_kwargs)
+    
+    def event_handler(self, event: pygame.event.Event):
+        pass
     
     def update(self):
         pass
