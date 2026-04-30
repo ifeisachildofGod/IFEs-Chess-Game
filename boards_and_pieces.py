@@ -64,8 +64,9 @@ class Piece(Base):
     def _pos_from_bit_pos(self, pos: bytes):
         return pos[0] * self.board.BLOCK_SIZE[0], pos[1] * self.board.BLOCK_SIZE[0]
     
-    def set_skin(self, piece_style: str):
+    def set_skin(self, piece_style: str, O: bool = None):
         self.piece_style = piece_style
+        self._O = O if O is not None else self._O
         
         path = f"assets/pieces and boards/{"White" if self.is_white else "Black"} {self.piece_style}/{self.piece_type}" + f"{" O" if self._O else ""}.png"
         
@@ -80,131 +81,54 @@ class Piece(Base):
         
         self.blit(skin, skin.get_rect(center=(self.get_width() / 2, self.get_height() / 2)))
     
-    def filter_checks(self, valid_moves: int):
-        my_bit = bit_byte_to_bits(self.pos)
-        king_bit = bit_byte_to_bits(self.get_team_king().pos)
-        
-        for piece in self.get_checking_enemies(king_bit):
-            n_moves = bit_byte_to_bits(piece.pos)
-            
-            if isinstance(piece, (Queen, Rook, Bishop)):
-                n_moves |= next(a_path for a_path in piece.get_attack_paths() if king_bit & a_path)
-            
-            valid_moves &= n_moves
-        
-        for piece in self.get_pathed_enemies():
-            for i, ua_path in enumerate(piece.get_king_attack_paths()):
-                a_path = piece.get_attack_paths()[i] % MAX_BIT
-                
-                if ua_path & king_bit and not ((self.get_team_bits() & ~(my_bit | king_bit)) & ua_path) and a_path & my_bit:
-                    valid_moves &= a_path | bit_byte_to_bits(piece.pos)
-        
-        return valid_moves
-    
     def update_valid_moves(self):
         self._valid_moves = self._update_valid_moves(
             0,
             self.pos,
             self=self,
             is_white=self.is_white,
-            team_bits=self.get_team_bits(),
-            enemy_bits=self.get_enemy_bits(),
-            enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
-            moves_count=self.moves_count,
+            team_bits=self.board.get_team_bits(self.is_white),
+            enemy_bits=self.board.get_enemy_bits(self.is_white),
+            enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white),
+            moves_count=self.moves_count
         ) % MAX_BIT
         
-        self._valid_moves &= ~self.get_team_bits()
+        self._valid_moves &= ~self.board.get_team_bits(self.is_white)
         self._valid_moves = self.filter_checks(self._valid_moves)
     
     def update_kill_zones(self):
         self._kill_zones = self._update_kill_zones(
             0,
             self.pos,
+            self=self,
             is_white=self.is_white,
-            team_bits=0,
-            enemy_bits=self.get_enemy_bits() | self.get_team_bits(),
-            enemy_kill_zones=self.board.get_white_kill_zones() + (self.board.get_black_kill_zones() - self.board.get_white_kill_zones()) * self.is_white,
             moves_count=self.moves_count,
-            self=self
+            team_bits=0,
+            enemy_bits=self.board.get_enemy_bits(self.is_white) | self.board.get_team_bits(self.is_white),
+            enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white)
         ) % MAX_BIT
         
-        self.update_attack_paths()
-    
-    def update_attack_paths(self):
         self._attack_paths = self._update_attack_paths(
             self.pos,
             0,
+            self=self,
             is_white=self.is_white,
-            team_bits=0,
-            enemy_bits=self.get_enemy_bits() | self.get_team_bits(),
-            enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
             moves_count=self.moves_count,
-            self=self
+            team_bits=0,
+            enemy_bits=self.board.get_enemy_bits(self.is_white) | self.board.get_team_bits(self.is_white),
+            enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white)
         )
         
-        self.update_king_attack_paths()
-    
-    def update_king_attack_paths(self):
         self._king_attack_paths = self._update_attack_paths(
             self.pos,
             0,
+            self=self,
             is_white=self.is_white,
-            team_bits=0,
-            enemy_bits=self.get_team_bits() | bit_byte_to_bits(self.get_enemy_king().pos),
-            enemy_kill_zones=(self.board.get_black_kill_zones() if self.is_white else self.board.get_white_kill_zones()),
             moves_count=self.moves_count,
-            self=self
+            team_bits=0,
+            enemy_bits=self.board.get_team_bits(self.is_white) | bit_byte_to_bits(self.board.get_enemy_king(self.is_white).pos),
+            enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white)
         )
-    
-    def capture(self, target: bytes):
-        team_pieces = self.board.white_pieces if self.is_white else self.board.black_pieces
-        enemy_pieces = self.board.black_pieces if self.is_white else self.board.white_pieces
-        
-        if target in enemy_pieces:
-            target_piece = enemy_pieces.pop(target)
-            self.board.pieces.remove(target_piece)
-            
-            target_piece.pos = None
-            
-            self.board.captures.append(target_piece)
-        
-        captor_piece = team_pieces.pop(self.pos)
-        
-        team_pieces[target] = captor_piece
-    
-    def get_team_bits(self):
-        return self.board.get_white_bits() if self.is_white else self.board.get_black_bits()
-    
-    def get_enemy_bits(self):
-        return self.board.get_black_bits() if self.is_white else self.board.get_white_bits()
-    
-    def get_pathed_enemies(self):
-        return list(self.board.get_black_pathed_pieces() if self.is_white else self.board.get_white_pathed_pieces())
-    
-    def get_pointed_enemies(self):
-        return list(self.board.get_black_point_pieces() if self.is_white else self.board.get_white_point_pieces())
-    
-    def get_checking_enemies(self, king_bit: int):
-        for piece in self.get_pointed_enemies():
-            if king_bit & piece.get_kill_zones():
-                yield piece
-        
-        for piece in self.get_pathed_enemies():
-            if king_bit & piece.get_kill_zones():
-                yield piece
-    
-    def total_move(self, to: bytes, piece_set: Callable[["Piece"], None] | None = None, finished: Callable[[], None] | None = None):
-        if self.pos[0] != to[0] or self.pos[1] != to[1]:
-            bit_to = bit_byte_to_bits(to)
-            
-            if bit_to & self.get_valid_moves():
-                self._moves.append([to, int(1 / self.SPEED), piece_set, finished])
-                self.moves_count += 1
-                
-                return
-        
-        if finished:
-            finished()
     
     def get_valid_moves(self):
         return self._valid_moves
@@ -218,11 +142,59 @@ class Piece(Base):
     def get_king_attack_paths(self):
         return self._king_attack_paths
     
-    def get_team_king(self):
-        return self.board.get_white_king() if self.is_white else self.board.get_black_king()
+    def get_checking_enemies(self, king_bit: int):
+        for piece in self.board.get_pointed_enemies(self.is_white):
+            if king_bit & piece.get_kill_zones():
+                yield piece
+        
+        for piece in self.board.get_pathed_enemies(self.is_white):
+            if king_bit & piece.get_kill_zones():
+                yield piece
     
-    def get_enemy_king(self):
-        return self.board.get_black_king() if self.is_white else self.board.get_white_king()
+    def capture(self, target: bytes):
+        team_pieces = self.board.get_team_pieces(self.is_white)
+        enemy_pieces = self.board.get_enemy_pieces(self.is_white)
+        
+        if target in enemy_pieces:
+            self.board.capture_piece(enemy_pieces[target])
+        
+        captor_piece = team_pieces.pop(self.pos)
+        
+        team_pieces[target] = captor_piece
+    
+    def filter_checks(self, valid_moves: int):
+        my_bit = bit_byte_to_bits(self.pos)
+        king_bit = bit_byte_to_bits(self.board.get_team_king(self.is_white).pos)
+        
+        for piece in self.get_checking_enemies(king_bit):
+            n_moves = bit_byte_to_bits(piece.pos)
+            
+            if isinstance(piece, (Queen, Rook, Bishop)):
+                n_moves |= next(a_path for a_path in piece.get_attack_paths() if king_bit & a_path)
+            
+            valid_moves &= n_moves
+        
+        for piece in self.board.get_pathed_enemies(self.is_white):
+            for i, ua_path in enumerate(piece.get_king_attack_paths()):
+                a_path = piece.get_attack_paths()[i] % MAX_BIT
+                
+                if ua_path & king_bit and not ((self.board.get_team_bits(self.is_white) & ~(my_bit | king_bit)) & ua_path) and a_path & my_bit:
+                    valid_moves &= a_path | bit_byte_to_bits(piece.pos)
+        
+        return valid_moves
+    
+    def total_move(self, to: bytes, piece_set: Callable[["Piece"], None] | None = None, finished: Callable[[], None] | None = None):
+        if self.pos[0] != to[0] or self.pos[1] != to[1]:
+            bit_to = bit_byte_to_bits(to)
+            
+            if bit_to & self.get_valid_moves():
+                self._moves.append([to, int(1 / self.SPEED), piece_set, finished])
+                self.moves_count += 1
+                
+                return
+        
+        if finished:
+            finished()
     
     def update(self):
         if self._moves:
@@ -369,7 +341,7 @@ class King(Piece):
     def _init(self):
         super()._init()
         
-        for piece in (self.board.white_pieces.values() if self.is_white else self.board.black_pieces.values()):
+        for piece in self.board.get_team_pieces(self.is_white).values():
             if isinstance(piece, Rook):
                 self.rooks[piece] = [0, 0]
     
@@ -504,37 +476,27 @@ class Knight(Piece):
 class Pawn(Piece):
     def __init__(self, board, is_white, pos, piece_style, O):
         super().__init__(board, is_white, pos, piece_style, O, "P")
+        
+        self.double_moved = False
+        self.en_pesant_pawns = {}
     
     def _bit_move(self, to):
+        curr_pos = self.pos
+        
         super()._bit_move(to)
         
+        if abs(curr_pos[1] - to[1]) == 2:
+            self.double_moved = True
+        
+        en_pesant_piece = self.en_pesant_pawns.get(self.pos)
+        if en_pesant_piece:
+            self.board.capture_piece(en_pesant_piece)
+        
         if self.pos[1] in (0, 7):
-            def destroyed(edit: PromoteEdit):
-                self.board.temp_draws.remove(edit)
-                self.board.temp_updates.remove(edit)
-                
-                self.board.pause_event = False
-            
-            promote_edit = PromoteEdit(
-                self.board,
-                self.board.BLOCK_SIZE,
-                self.promote,
-                self.is_white,
-                self.board.board_style,
-                self.piece_style,
-                self._O,
-                {"Q": Queen, "R": Rook, "B": Bishop, "N": Knight},
-                {("midtop" if self.pos[1] == 0 else "midbottom"): (self.pos[0] * self.get_width() + self.get_width() / 2, (0 if self.pos[1] == 0 else self.board.get_height()))},
-                destroyed
-            )
-            
-            self.board.temp_draws.append(promote_edit)
-            self.board.temp_updates.append(promote_edit)
-            
-            self.board.pause_event = True
+            self.promote()
     
-    def promote(self, promote_piece_cls: type[Piece]):
-        team_pieces = self.board.white_pieces if self.is_white else self.board.black_pieces
+    def _promote(self, promote_piece_cls: type[Piece]):
+        pos = self.pos
         
         piece = promote_piece_cls(self.board, self.is_white, self.pos, self.piece_style, self._O)
         piece._init()
@@ -542,12 +504,12 @@ class Pawn(Piece):
         piece.update_valid_moves()
         piece.update_kill_zones()
         
-        team_pieces[self.pos] = piece
         self.board.pieces.add(piece)
         
-        self.board.pieces.remove(self)
+        self.board.remove_piece(self)
         
-        self.pos = None
+        team_pieces = self.board.get_team_pieces(self.is_white)
+        team_pieces[pos] = piece
         
         del self
     
@@ -564,10 +526,13 @@ class Pawn(Piece):
     
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
+        self = kwargs["self"]
         is_white = kwargs["is_white"]
         team_bits = kwargs["team_bits"]
         enemy_bits = kwargs["enemy_bits"]
         moves_count = kwargs["moves_count"]
+        
+        enemy_pieces = self.board.get_enemy_pieces(is_white)
         
         direction = is_white * 2 - 1
         avoid = team_bits | enemy_bits
@@ -585,15 +550,55 @@ class Pawn(Piece):
         
         single_move = bit_shift_left(vert_single, single_next_level)
         double_move = ((moves_count != 0) or (bit_shift_left(vert_double, double_next_level) + 1)) - 1
-        capturables = kwargs["self"]._update_kill_zones(0, pos, **kwargs) & enemy_bits
+        capturables = self._update_kill_zones(0, pos, **kwargs) & enemy_bits
+        
+        en_pesant = 0
+        en_pesant_enemies = (
+            enemy_pieces.get(bytes([pos[0] - 1, pos[1]])) if pos[0] else None,
+            enemy_pieces.get(bytes([pos[0] + 1, pos[1]])) if pos[0] - 7 else None
+        )
+        self.en_pesant_pawns.clear()
+        
+        for enemy in en_pesant_enemies:
+            if enemy and isinstance(enemy, Pawn) and enemy.double_moved and self.board.moves[-1][1] == enemy.pos:
+                ep_pos = bytes([enemy.pos[0], enemy.pos[1] - direction])
+                en_pesant |= bit_byte_to_bits(ep_pos)
+                
+                self.en_pesant_pawns[ep_pos] = enemy
         
         valid_moves |= (
             single_move |
             double_move |
-            capturables
+            capturables |
+            en_pesant
         )
         
         return valid_moves
+    
+    def promote(self):
+        def destroyed(edit: PromoteEdit):
+            self.board.temp_draws.remove(edit)
+            self.board.temp_updates.remove(edit)
+            
+            self.board.pause_event = False
+        
+        promote_edit = PromoteEdit(
+            self.board,
+            self.board.BLOCK_SIZE,
+            self._promote,
+            self.is_white,
+            self.board.board_style,
+            self.piece_style,
+            self._O,
+            {"Q": Queen, "R": Rook, "B": Bishop, "N": Knight},
+            {("midtop" if self.pos[1] == 0 else "midbottom"): (self.pos[0] * self.get_width() + self.get_width() / 2, (0 if self.pos[1] == 0 else self.board.get_height()))},
+            destroyed
+        )
+        
+        self.board.temp_draws.append(promote_edit)
+        self.board.temp_updates.append(promote_edit)
+        
+        self.board.pause_event = True
 
 
 class Board(Base):
@@ -602,7 +607,9 @@ class Board(Base):
         
         self.BLOCK_SIZE = self.get_width() / 8, self.get_height() / 8
         
+        self.moves = []
         self.captures = []
+        
         self._turn_tracker = True
         self._move_selected = False
         
@@ -641,6 +648,8 @@ class Board(Base):
         
         for e_pieces in self.pieces:
             e_pieces.update_kill_zones()
+
+        self.moves.append((self._prev_moves[0], piece.pos))
     
     def set_data(
         self,
@@ -662,6 +671,19 @@ class Board(Base):
             piece.update_valid_moves()
             piece.update_kill_zones()
     
+    def remove_piece(self, piece: Piece):
+        team_pieces = self.get_team_pieces(piece.is_white)
+        
+        team_pieces.pop(piece.pos)
+        self.pieces.remove(piece)
+        
+        piece.pos = None
+    
+    def capture_piece(self, piece: Piece):
+        self.remove_piece(piece)
+        
+        self.captures.append(piece)
+    
     def set_board_style(self, style: str):
         self.board_style = style
         
@@ -680,78 +702,81 @@ class Board(Base):
         for piece in self.pieces:
             piece.set_skin(style)
     
-    def get_white_bits(self):
+    def get_team_pieces(self, is_white: bool):
+        return self.white_pieces if is_white else self.black_pieces
+    
+    def get_enemy_pieces(self, is_white: bool):
+        return self.black_pieces if is_white else self.white_pieces
+    
+    def get_team_bits(self, is_white: bool):
         bits = 0
-        for pos in self.white_pieces:
-            bits |= bit_byte_to_bits(pos)
+        
+        if is_white:
+            for pos in self.white_pieces:
+                bits |= bit_byte_to_bits(pos)
+        else:
+            for pos in self.black_pieces:
+                bits |= bit_byte_to_bits(pos)
         
         return bits
     
-    def get_black_bits(self):
+    def get_enemy_bits(self, is_white: bool):
         bits = 0
         
-        for pos in self.black_pieces:
-            bits |= bit_byte_to_bits(pos)
+        if is_white:
+            for pos in self.black_pieces:
+                bits |= bit_byte_to_bits(pos)
+        else:
+            for pos in self.white_pieces:
+                bits |= bit_byte_to_bits(pos)
         
         return bits
     
-    def get_white_valid_moves(self):
+    def get_pathed_enemies(self, is_white: bool):
+        enemies: list[Piece] = []
+        
+        if is_white:
+            for piece in self.black_pieces.values():
+                if isinstance(piece, (Queen, Rook, Bishop)):
+                    enemies.append(piece)
+        else:
+            for piece in self.white_pieces.values():
+                if isinstance(piece, (Queen, Rook, Bishop)):
+                    enemies.append(piece)
+        
+        return enemies
+    
+    def get_pointed_enemies(self, is_white: bool):
+        enemies: list[Piece] = []
+        
+        if is_white:
+            for piece in self.black_pieces.values():
+                if not isinstance(piece, (Queen, Rook, Bishop)):
+                    enemies.append(piece)
+        else:
+            for piece in self.white_pieces.values():
+                if not isinstance(piece, (Queen, Rook, Bishop)):
+                    enemies.append(piece)
+        
+        return enemies
+    
+    def get_enemy_kill_zones(self, is_white: bool):
         bits = 0
         
-        for pieces in self.white_pieces.values():
-            bits |= pieces.get_valid_moves()
+        if is_white:
+            for pieces in self.black_pieces.values():
+                bits |= pieces.get_kill_zones()
+        else:
+            for pieces in self.white_pieces.values():
+                bits |= pieces.get_kill_zones()
         
         return bits
     
-    def get_black_valid_moves(self):
-        bits = 0
-        
-        for pieces in self.black_pieces.values():
-            bits |= pieces.get_valid_moves()
-        
-        return bits
+    def get_team_king(self, is_white: bool):
+        return self._white_king if is_white else self._black_king
     
-    def get_white_kill_zones(self):
-        bits = 0
-        
-        for pieces in self.white_pieces.values():
-            bits |= pieces.get_kill_zones()
-        
-        return bits
-    
-    def get_black_kill_zones(self):
-        bits = 0
-        
-        for pieces in self.black_pieces.values():
-            bits |= pieces.get_kill_zones()
-        
-        return bits
-    
-    def get_white_pathed_pieces(self):
-        for piece in self.white_pieces.values():
-            if isinstance(piece, (Queen, Rook, Bishop)):
-                yield piece
-    
-    def get_black_pathed_pieces(self):
-        for piece in self.black_pieces.values():
-            if isinstance(piece, (Queen, Rook, Bishop)):
-                yield piece
-    
-    def get_white_point_pieces(self):
-        for piece in self.white_pieces.values():
-            if not isinstance(piece, (Queen, Rook, Bishop)):
-                yield piece
-    
-    def get_black_point_pieces(self):
-        for piece in self.black_pieces.values():
-            if not isinstance(piece, (Queen, Rook, Bishop)):
-                yield piece
-    
-    def get_white_king(self):
-        return self._white_king
-    
-    def get_black_king(self):
-        return self._black_king
+    def get_enemy_king(self, is_white: bool):
+        return self._black_king if is_white else self._white_king
     
     def do_pos_from_bits(self, bits, action: Callable[[int, int], None], *, _count = None):
         _count = _count or 0
