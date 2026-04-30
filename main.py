@@ -123,8 +123,9 @@ def from_board_to_string(board: Board):
     
     return string
 
+board_params = ("rnbqkbnr p8 x32 P8 RNBQKBNR", "Brown", "Default", True)
 
-board = from_string_to_board("rnbqkbnr p8 x32 P8 RNBQKBNR", "Brown", "Default", True)
+board = from_string_to_board(*board_params)
 
 while True:
     for event in pygame.event.get():
@@ -133,6 +134,10 @@ while True:
             exit()
         
         board.event_handler(event)
+        
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE and board.WHITE_WINS + board.BLACK_WINS + board.DRAW:
+                board = from_string_to_board(*board_params)
     
     board.run()
     

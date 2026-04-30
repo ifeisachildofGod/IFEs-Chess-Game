@@ -103,7 +103,7 @@ class Piece(Base):
             self=self,
             is_white=self.is_white,
             moves_count=self.moves_count,
-            team_bits=0,
+            team_bits=bit_byte_to_bits(self.pos),
             enemy_bits=self.board.get_enemy_bits(self.is_white) | self.board.get_team_bits(self.is_white),
             enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white)
         ) % MAX_BIT
@@ -114,7 +114,7 @@ class Piece(Base):
             self=self,
             is_white=self.is_white,
             moves_count=self.moves_count,
-            team_bits=0,
+            team_bits=bit_byte_to_bits(self.pos),
             enemy_bits=self.board.get_enemy_bits(self.is_white) | self.board.get_team_bits(self.is_white),
             enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white)
         )
@@ -125,7 +125,7 @@ class Piece(Base):
             self=self,
             is_white=self.is_white,
             moves_count=self.moves_count,
-            team_bits=0,
+            team_bits=bit_byte_to_bits(self.pos),
             enemy_bits=self.board.get_team_bits(self.is_white) | bit_byte_to_bits(self.board.get_enemy_king(self.is_white).pos),
             enemy_kill_zones=self.board.get_enemy_kill_zones(self.is_white)
         )
@@ -142,15 +142,6 @@ class Piece(Base):
     def get_king_attack_paths(self):
         return self._king_attack_paths
     
-    def get_checking_enemies(self, king_bit: int):
-        for piece in self.board.get_pointed_enemies(self.is_white):
-            if king_bit & piece.get_kill_zones():
-                yield piece
-        
-        for piece in self.board.get_pathed_enemies(self.is_white):
-            if king_bit & piece.get_kill_zones():
-                yield piece
-    
     def capture(self, target: bytes):
         team_pieces = self.board.get_team_pieces(self.is_white)
         enemy_pieces = self.board.get_enemy_pieces(self.is_white)
@@ -166,7 +157,7 @@ class Piece(Base):
         my_bit = bit_byte_to_bits(self.pos)
         king_bit = bit_byte_to_bits(self.board.get_team_king(self.is_white).pos)
         
-        for piece in self.get_checking_enemies(king_bit):
+        for piece in self.board.get_checking_enemies(self.is_white, king_bit):
             n_moves = bit_byte_to_bits(piece.pos)
             
             if isinstance(piece, (Queen, Rook, Bishop)):
@@ -179,7 +170,7 @@ class Piece(Base):
                 a_path = piece.get_attack_paths()[i] % MAX_BIT
                 
                 if ua_path & king_bit and not ((self.board.get_team_bits(self.is_white) & ~(my_bit | king_bit)) & ua_path) and a_path & my_bit:
-                    valid_moves &= a_path | bit_byte_to_bits(piece.pos)
+                    valid_moves &= ua_path | bit_byte_to_bits(piece.pos)
         
         return valid_moves
     
@@ -361,15 +352,15 @@ class King(Piece):
     def filter_checks(self, valid_moves):
         king_bit = bit_byte_to_bits(self.pos)
         
-        for piece in self.get_checking_enemies(king_bit):
-            n_moves = bit_byte_to_bits(piece.pos)
+        for piece in self.board.get_checking_enemies(self.is_white, king_bit):
+            n_moves = 0
             
             if isinstance(piece, (Queen, Rook, Bishop)):
                 n_moves |= piece._update_valid_moves(
                     0,
                     piece.pos,
                     is_white=piece.is_white,
-                    team_bits=0,
+                    team_bits=bit_byte_to_bits(piece.pos),
                     enemy_bits=0,
                     enemy_kill_zones=0,
                     moves_count=piece.moves_count,
@@ -384,24 +375,30 @@ class King(Piece):
     def _update_attack_paths(pos, valid_paths, **kwargs):
         pass
     
+    def _update_all_kill_moves(self, valid_moves):
+        middle_dir = (7 - self.pos[1]) * 8
+        top_dir = (7 - self.pos[1] + 1) * 8
+        bottom_dir = (7 - self.pos[1] - 1) * 8
+        
+        middle = bit_shift_left(5, 7 - self.pos[0] - 1) % 256
+        top_bottom = bit_shift_left(7, 7 - self.pos[0] - 1) % 256
+        
+        valid_moves |= (
+            bit_shift_left(top_bottom, top_dir) |
+            bit_shift_left(middle, middle_dir) |
+            bit_shift_left(top_bottom, bottom_dir)
+        ) % MAX_BIT
+        
+        return valid_moves
+
     @staticmethod
     def _update_valid_moves(valid_moves, pos, **kwargs):
         self = kwargs["self"]
+        is_white = kwargs["is_white"]
         team_bits = kwargs["team_bits"]
         moves_count = kwargs["moves_count"]
         enemy_kill_zones = kwargs["enemy_kill_zones"]
-        
-        middle_dir = (7 - pos[1]) * 8
-        top_dir = (7 - pos[1] + 1) * 8
-        bottom_dir = (7 - pos[1] - 1) * 8
-        
-        middle_mask = ((enemy_kill_zones >> middle_dir) % 256)
-        top_mask = ((enemy_kill_zones >> top_dir) % 256)
-        bottom_mask = (bit_shift_right(enemy_kill_zones, bottom_dir) % 256)
-        
-        left = bit_shift_left(4, 7 - pos[0] - 1) % 256
-        right = bit_shift_left(1, 7 - pos[0] - 1) % 256
-        center = bit_byte_to_bits(bytes([pos[0], 7]))
+        enemy_king_moves = self.board.get_enemy_king(is_white)._update_all_kill_moves(0)
         
         i = 0
         self.castleable_bits = 0
@@ -411,9 +408,10 @@ class King(Piece):
             
             castleable = (
                 rook.pos and
+                pos[1] == rook.pos[1] and
                 moves_count + rook.moves_count == 0 and
                 not (team_bits >> (7 - pos[1]) * 8 + (7 - max(pos[0], rook.pos[0]) + 1)) % (1 << (abs(pos[0] - rook.pos[0]) - 1)) and
-                next(self.get_checking_enemies(bit_byte_to_bits(pos)), None) is None
+                next(self.board.get_checking_enemies(is_white, bit_byte_to_bits(pos)), None) is None
             )
             
             if castleable:
@@ -427,7 +425,7 @@ class King(Piece):
                 if not king_castle_bit & enemy_kill_zones:
                     self.castleable_bits |= king_castle_bit
                     self.rooks[rook] = [rook_castle_bit, king_castle_bit]
-            elif moves_count + rook.moves_count != 0 or not rook.pos:
+            elif moves_count + rook.moves_count != 0 or not rook.pos or pos[1] != rook.pos[1]:
                 self.rooks.pop(rook)
                 rooks.pop(i)
                 
@@ -435,17 +433,9 @@ class King(Piece):
             
             i += 1
         
-        return valid_moves | (
-            bit_shift_left(center & ~top_mask, top_dir) |
-            bit_shift_left(center & ~bottom_mask, bottom_dir) |
-            bit_shift_left(left & ~middle_mask, middle_dir) |
-            bit_shift_left(right & ~middle_mask, middle_dir) |
-            bit_shift_left(left & ~top_mask, top_dir) |
-            bit_shift_left(right & ~top_mask, top_dir) |
-            bit_shift_left(left & ~bottom_mask, bottom_dir) |
-            bit_shift_left(right & ~bottom_mask, bottom_dir) |
-            self.castleable_bits
-        )
+        valid_moves |= (self._update_all_kill_moves(valid_moves) | self.castleable_bits) & ~(enemy_kill_zones | enemy_king_moves)
+        
+        return valid_moves
 
 class Knight(Piece):
     def __init__(self, board, is_white, pos, piece_style, O):
@@ -485,8 +475,7 @@ class Pawn(Piece):
         
         super()._bit_move(to)
         
-        if abs(curr_pos[1] - to[1]) == 2:
-            self.double_moved = True
+        self.double_moved = abs(curr_pos[1] - to[1]) == 2
         
         en_pesant_piece = self.en_pesant_pawns.get(self.pos)
         if en_pesant_piece:
@@ -510,6 +499,8 @@ class Pawn(Piece):
         
         team_pieces = self.board.get_team_pieces(self.is_white)
         team_pieces[pos] = piece
+        
+        self.board.check_game_over()
         
         del self
     
@@ -541,7 +532,7 @@ class Pawn(Piece):
         double_next_level = (7 - pos[1] + (2 * direction)) * 8
         
         mask_1 = (avoid >> single_next_level) % 256
-        mask_2 = (avoid >> double_next_level) % 256
+        mask_2 = bit_shift_right(avoid, double_next_level) % 256
         
         _vert = bit_byte_to_bits(bytes([pos[0], 7]))
         
@@ -549,7 +540,7 @@ class Pawn(Piece):
         vert_double = _vert & ~(mask_1 | mask_2)
         
         single_move = bit_shift_left(vert_single, single_next_level)
-        double_move = ((moves_count != 0) or (bit_shift_left(vert_double, double_next_level) + 1)) - 1
+        double_move = ((moves_count != 0 or pos[1] not in (1, 6)) or (bit_shift_left(vert_double, double_next_level) + 1)) - 1
         capturables = self._update_kill_zones(0, pos, **kwargs) & enemy_bits
         
         en_pesant = 0
@@ -633,13 +624,18 @@ class Board(Base):
         
         self.temp_draws: list[Piece] = []
         self.temp_updates: list[Piece] = []
+        
+        self.DRAW = False
+        self.WHITE_WINS = False
+        self.BLACK_WINS = False
+        
+        self.font = pygame.font.SysFont("impact", 50)
     
     def _no_focus(self):
         self.focus_piece = None
     
     def _piece_placed(self, piece: Piece):
-        self._turn_tracker = not self._turn_tracker
-        
+        piece.update_valid_moves()
         piece.update_kill_zones()
         
         self._prev_moves[1] = piece.pos
@@ -647,9 +643,26 @@ class Board(Base):
         self._prev_moves[0] = None
         
         for e_pieces in self.pieces:
+            e_pieces.update_valid_moves()
             e_pieces.update_kill_zones()
 
         self.moves.append((self._prev_moves[0], piece.pos))
+        
+        self.check_game_over()
+        
+        self._turn_tracker = not self._turn_tracker
+    
+    def check_game_over(self):
+        if not self.get_enemy_valid_moves(self._turn_tracker):
+            if self.get_enemy_valid_moves(not self._turn_tracker) & bit_byte_to_bits(self.get_team_king(not self._turn_tracker).pos):
+                if self._turn_tracker:
+                    self.WHITE_WINS = True
+                else:
+                    self.BLACK_WINS = True
+            else:
+                self.DRAW = True
+            
+            self.pause_event = True
     
     def set_data(
         self,
@@ -760,6 +773,18 @@ class Board(Base):
         
         return enemies
     
+    def get_enemy_valid_moves(self, is_white: bool):
+        bits = 0
+        
+        if is_white:
+            for pieces in self.black_pieces.values():
+                bits |= pieces.get_valid_moves()
+        else:
+            for pieces in self.white_pieces.values():
+                bits |= pieces.get_valid_moves()
+        
+        return bits
+    
     def get_enemy_kill_zones(self, is_white: bool):
         bits = 0
         
@@ -777,6 +802,11 @@ class Board(Base):
     
     def get_enemy_king(self, is_white: bool):
         return self._black_king if is_white else self._white_king
+    
+    def get_checking_enemies(self, is_white: bool, king_bit: int):
+        for piece in self.get_pointed_enemies(is_white) + self.get_pathed_enemies(is_white):
+            if king_bit & piece.get_kill_zones():
+                yield piece
     
     def do_pos_from_bits(self, bits, action: Callable[[int, int], None], *, _count = None):
         _count = _count or 0
@@ -863,6 +893,19 @@ class Board(Base):
         
         if self.focus_piece:
             self.focus_piece.draw()
+        
+        text = None
+        
+        if self.WHITE_WINS:
+            text = "WHITE WINS"
+        elif self.BLACK_WINS:
+            text = "BLACK WINS"
+        elif self.DRAW:
+            text = "DRAW"
+        
+        if text:
+            text_surf = self.font.render(text, True, self.board_style)
+            self.background.blit(text_surf, text_surf.get_rect(center=(self.get_width() / 2, self.get_height() / 2)))
         
         return super().draw()
 
