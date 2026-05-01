@@ -553,9 +553,32 @@ class Pawn(Piece):
         for enemy in en_pesant_enemies:
             if enemy and isinstance(enemy, Pawn) and enemy.double_moved and self.board.moves[-1][1] == enemy.pos:
                 ep_pos = bytes([enemy.pos[0], enemy.pos[1] - direction])
-                en_pesant |= bit_byte_to_bits(ep_pos)
                 
-                self.en_pesant_pawns[ep_pos] = enemy
+                enemy_bit = bit_byte_to_bits(enemy.pos)
+                king_bit = bit_byte_to_bits(self.board.get_team_king(is_white).pos)
+                
+                for p_enemy in self.board.get_pathed_enemies(is_white):
+                    only_king_attack_paths = p_enemy._update_attack_paths(
+                        p_enemy.pos,
+                        0,
+                        self=p_enemy,
+                        is_white=p_enemy.is_white,
+                        moves_count=p_enemy.moves_count,
+                        team_bits=bit_byte_to_bits(p_enemy.pos),
+                        enemy_bits=king_bit,
+                        enemy_kill_zones=self.board.get_enemy_kill_zones(p_enemy.is_white)
+                    )
+                    
+                    for ka_path in only_king_attack_paths:
+                        if ka_path & king_bit and enemy_bit & ka_path:
+                            break
+                    else:
+                        continue
+                    
+                    break
+                else:
+                    en_pesant |= bit_byte_to_bits(ep_pos)
+                    self.en_pesant_pawns[ep_pos] = enemy
         
         valid_moves |= (
             single_move |
@@ -643,13 +666,13 @@ class Board(Base):
         self._prev_moves[2] = self._prev_moves[0]
         self._prev_moves[0] = None
         
-        for e_pieces in self.pieces:
-            e_pieces.update_valid_moves()
-            e_pieces.update_kill_zones()
-        
         is_check = self.get_enemy_valid_moves(not self._turn_tracker) & bit_byte_to_bits(self.get_team_king(not self._turn_tracker).pos)
         
         self.moves.append((self._prev_moves[0], piece.pos, is_check, len(self.captures) - self._prev_capture_len))
+        
+        for e_pieces in self.pieces:
+            e_pieces.update_valid_moves()
+            e_pieces.update_kill_zones()
         
         self.check_game_over(is_check)
         
