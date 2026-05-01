@@ -123,7 +123,7 @@ def from_board_to_string(board: Board):
     
     return string
 
-board_params = ("K x32 k x3 p x x x12 P", "Brown", "Default", True)
+board_params = ("rnbqkbnr p8 x32 P8 RNBQKBNR", "Brown", "Default", True)
 
 board = from_string_to_board(*board_params)
 
