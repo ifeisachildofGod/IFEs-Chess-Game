@@ -600,6 +600,7 @@ class Board(Base):
         
         self.moves = []
         self.captures = []
+        self.is_checks = []
         
         self._turn_tracker = True
         self._move_selected = False
@@ -645,16 +646,18 @@ class Board(Base):
         for e_pieces in self.pieces:
             e_pieces.update_valid_moves()
             e_pieces.update_kill_zones()
-
-        self.moves.append((self._prev_moves[0], piece.pos))
         
-        self.check_game_over()
+        is_check = self.get_enemy_valid_moves(not self._turn_tracker) & bit_byte_to_bits(self.get_team_king(not self._turn_tracker).pos)
+        
+        self.moves.append((self._prev_moves[0], piece.pos, is_check, len(self.captures) - self._prev_capture_len))
+        
+        self.check_game_over(is_check)
         
         self._turn_tracker = not self._turn_tracker
     
-    def check_game_over(self):
+    def check_game_over(self, is_check: bool):
         if not self.get_enemy_valid_moves(self._turn_tracker):
-            if self.get_enemy_valid_moves(not self._turn_tracker) & bit_byte_to_bits(self.get_team_king(not self._turn_tracker).pos):
+            if is_check:
                 if self._turn_tracker:
                     self.WHITE_WINS = True
                 else:
@@ -683,6 +686,19 @@ class Board(Base):
             piece._init()
             piece.update_valid_moves()
             piece.update_kill_zones()
+    
+    def select_piece(self, piece: Piece):
+        piece.update_valid_moves()
+        
+        self.focus_piece = piece
+        self._prev_moves[0] = self.focus_piece.pos
+        
+        self._move_selected = False
+    
+    def move_piece(self, piece: Piece, to: bytes):
+        self._prev_capture_len = len(self.captures)
+        piece.total_move(to, self._piece_placed, self._no_focus)
+        self._move_selected = True
     
     def remove_piece(self, piece: Piece):
         team_pieces = self.get_team_pieces(piece.is_white)
@@ -825,21 +841,14 @@ class Board(Base):
             
             for piece in (self.white_pieces.values() if self._turn_tracker else self.black_pieces.values()):
                 if piece.rect.collidepoint(m_pos) and piece != self.focus_piece:
-                    piece.update_valid_moves()
-                    
-                    if piece.get_valid_moves():
-                        self.focus_piece = piece
-                        self._prev_moves[0] = self.focus_piece.pos
-                        
-                        self._move_selected = False
+                    self.select_piece(piece)
                     
                     break
             else:
                 if self.focus_piece is not None:
                     pos = bytes([int(m_pos[0] // self.BLOCK_SIZE[0]), int(m_pos[1] // self.BLOCK_SIZE[1])])
                     
-                    self.focus_piece.total_move(pos, self._piece_placed, self._no_focus)
-                    self._move_selected = True
+                    self.move_piece(self.focus_piece, pos)
         
         for piece in self.temp_updates:
             piece.event_handler(event)
